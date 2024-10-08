@@ -91,31 +91,6 @@ class BayesParallelRunnerNew:
         self.t = 0
         self.env_steps_this_run = 0
 
-    def save_data(self,data):
-        first_batch_data = data[0, :]  # 形状为 [agent_number]
-        # output_folder="/home/sbc/PycharmProjects/CFCQL/CFCQL-main/discrete/results/Q_values4"
-        output_folder=os.path.join("/home/sbc/PycharmProjects/CFCQL/CFCQL-main/discrete/results/Q",self.args.unique_token)
-        os.makedirs(output_folder, exist_ok=True)
-        # 将每个 agent 的数据存储到单独的文件中
-        for agent_idx in range(len(self.macs)):
-            agent_data = first_batch_data[agent_idx]  # 获取第 agent_idx 个智能体的数据
-            filename = f'agent_{agent_idx}_data.txt'  # 为每个 agent 创建一个文件名
-            filepath = os.path.join(output_folder, filename)
-            with open(filepath, 'a') as f:  # 'a' 模式表示追加内容
-                f.write(str(agent_data) + '\n')
-
-    def save_data_prob(self,data):
-        # output_folder="/home/sbc/PycharmProjects/CFCQL/CFCQL-main/discrete/results/Q_values4"
-        output_folder=os.path.join("/home/sbc/PycharmProjects/CFCQL/CFCQL-main/discrete/results/prob",self.args.unique_token)
-        os.makedirs(output_folder, exist_ok=True)
-        # 将每个 agent 的数据存储到单独的文件中
-        for agent_idx in range(len(self.macs)):
-            agent_data = data[0][agent_idx]  # 获取第 agent_idx 个智能体的数据
-            filename = f'agent_{agent_idx}_data.txt'  # 为每个 agent 创建一个文件名
-            filepath = os.path.join(output_folder, filename)
-            with open(filepath, 'a') as f:  # 'a' 模式表示追加内容
-                f.write(str(agent_data) + '\n')
-
 
     def run(self, test_mode=False):
         self.reset()
@@ -160,9 +135,6 @@ class BayesParallelRunnerNew:
                     selected_mac_idx = th.multinomial(mac_probs, num_samples=1).squeeze(1)
                     actions = th.stack([actions_list[i][b] for b, i in enumerate(selected_mac_idx)], dim=0)
 
-                    if test_mode==False:
-                        self.save_data_prob(mac_probs)
-                        self.save_data(q_outs)
                 else:
                     actions = self.mac.select_actions(self.batch, t_ep=self.t, t_env=self.t_env, bs=envs_not_terminated,
                                                       test_mode=test_mode)
