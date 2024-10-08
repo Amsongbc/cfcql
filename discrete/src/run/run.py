@@ -1,6 +1,7 @@
 import datetime
 import os
 import pprint
+import copy
 from re import L
 import time
 import threading
@@ -13,7 +14,7 @@ from os.path import dirname, abspath
 from learners import REGISTRY as le_REGISTRY
 from runners import REGISTRY as r_REGISTRY
 from controllers import REGISTRY as mac_REGISTRY
-from components.episode_buffer import ReplayBuffer
+from components.episode_buffer import ReplayBuffer, BayesReplayBuffer
 from components.transforms import OneHot
 
 import numpy as np
@@ -152,12 +153,7 @@ def evaluate_sequential(args, runner):
 
 def run_sequential(args, logger):
 
-
-    if args.use_bayes and not args.use_offline:
-        runner = r_REGISTRY["bayes"](args=args, logger=logger)
-    else:
-        # Init runner so we can get env info
-        runner = r_REGISTRY["parallel"](args=args, logger=logger)
+    runner = r_REGISTRY[args.runner](args=args, logger=logger)
     #runner = r_REGISTRY[args.runner](args=args, logger=logger)
     # Set up schemes and groups here
     env_info = runner.get_env_info()
@@ -189,18 +185,24 @@ def run_sequential(args, logger):
     if args.use_offline or args.collect_data:
         args.buffer_size=10
 
-    num_bayes_train = 5 if args.use_bayes and not args.use_offline else 1
+    num_bayes_train = 5 if args.use_bayes else 1
 
-    buffer = ReplayBuffer(scheme, groups, args.buffer_size, env_info["episode_limit"] + 1,
-                          preprocess=preprocess,
-                          device="cpu" if args.buffer_cpu_only else args.device)
+    if args.use_bayes:
+        buffer = ReplayBuffer(scheme, groups, args.buffer_size, env_info["episode_limit"] + 1,
+                              preprocess=preprocess,
+                              device="cpu" if args.buffer_cpu_only else args.device)
+    else:
+        buffer = ReplayBuffer(scheme, groups, args.buffer_size, env_info["episode_limit"] + 1,
+                              preprocess=preprocess,
+                              device="cpu" if args.buffer_cpu_only else args.device)
 
     # Setup multiagent controller here
     mac = mac_REGISTRY[args.mac](buffer.scheme, groups, args)
     learner = le_REGISTRY[args.learner](mac, buffer.scheme, logger, args)
-    if args.use_bayes and not args.use_offline:
+    if args.use_bayes:
         macs = []
         learners = []
+        mixers=[]
         for i in range(num_bayes_train):
             basic_mac = mac_REGISTRY[args.mac](buffer.scheme, groups, args)
             basic_learner = le_REGISTRY[args.learner](basic_mac, buffer.scheme, logger, args)
@@ -208,7 +210,11 @@ def run_sequential(args, logger):
                 basic_learner.cuda()
             macs.append(basic_mac)
             learners.append(basic_learner)
-        runner.setup(scheme=scheme, groups=groups, preprocess=preprocess, mac=mac,macs=macs,args=args)
+            # mixers.append(basic_learner.mixer)
+
+        # runner.setup(scheme=scheme, groups=groups, preprocess=preprocess, mac=mac,macs=macs,mixers=mixers,args=args)
+        runner.setup(scheme=scheme, groups=groups, preprocess=preprocess, mac=mac, macs=macs, args=args)
+        # runner.setup(scheme=scheme, groups=groups, preprocess=preprocess, mac=macs[0])
     else:
         runner.setup(scheme=scheme, groups=groups, preprocess=preprocess, mac=mac)
 
@@ -254,30 +260,27 @@ def run_sequential(args, logger):
 
         runner.t_env = timestep_to_load
         ###########################
-        runner.t_env=0
+        # runner.t_env=0
         ###########################
 
         if args.evaluate or args.save_replay:
             evaluate_sequential(args, runner)
             return
 
-    # if getattr(args, 'use_offline_loss', False):
-    #     if getattr(args, 'moderate_lambda', False):
-    #         be_path = f"autodl-tmp/discrete/offline_datasets/{args.env_args['map_name']}_{args.h5file_suffix}_bcmodel"
-    #         learner.load_behaviour_model(be_path)
+    # model_path="/home/sbc/PycharmProjects/CFCQL/CFCQL-main/discrete/results/models/2s3z/bayes_expert/1"
+    # logger.console_logger.info("Loading model from {}".format(model_path))
+    # learner.load_models(model_path)
 
     if args.use_bayes and not args.use_offline:
         model_ph = os.path.join(dirname(dirname(dirname(abspath(__file__)))), "results","models")
 
         for i in range(num_bayes_train):
-            model_path = os.path.join(model_ph, args.env_args['map_name'], f"bayes_{args.h5file_suffix}", str(i + 1))
-            # model_path= f"model_ph/{args.env_args['map_name']}/bayes_{args.h5file_suffix}/{i+1}"
+            model_path = os.path.join(model_ph, args.env_args['map_name'], f"bayes_{args.h5file_suffix}", str(i+1))
             logger.console_logger.info("Loading model from {}".format(model_path))
             learners[i].load_models(model_path)
             if getattr(args, 'moderate_lambda', False):
                 bamodel_ph = os.path.join(dirname(dirname(dirname(abspath(__file__)))), "offline_datasets")
                 be_path = os.path.join(bamodel_ph, f"{args.env_args['map_name']}_{args.h5file_suffix}_bcmodel{i + 1}")
-                # be_path = f"/home/sbc/PycharmProjects/CFCQL/CFCQL-main/discrete/offline_datasets/{args.env_args['map_name']}_{args.h5file_suffix}_bcmodel{i+1}"
                 learners[i].load_behaviour_model(be_path)
                 logger.console_logger.info("Loading behivaor model from {}".format(be_path))
 
@@ -300,15 +303,19 @@ def run_sequential(args, logger):
         data_dir=os.path.join(dirname(dirname(dirname(abspath(__file__)))), "offline_datasets")
         total_datas,hdkey = load_datasets(args,logger,data_dir)
         if args.use_bayes:
-            for i in range(args.mask_number):
-                mask = np.random.binomial(1, 0.5, size=total_datas[hdkey[0]].shape[0])  # Bernoulli 分布
-            total_datas = {key: total_datas[key][mask == 1] for key in hdkey}  # 仅保留被 mask 选择的数据
+            bootstrapped_datas = []  # 存储自举数据集
+            for i in range(num_bayes_train):
+                mask = np.random.binomial(1, 0.8, size=total_datas[hdkey[0]].shape[0])
+                bootstrapped_data = {key: total_datas[key][mask == 1] for key in hdkey}
+                bootstrapped_datas.append(bootstrapped_data)
+                if getattr(args, 'moderate_lambda', False) :
+                    train_behaviour_policy(args,bootstrapped_data,logger,learners[i],runner,data_dir,hdkey,scheme, groups,preprocess,i)
         #####################################
-        if getattr(args, 'moderate_lambda', False) :
-            train_behaviour_policy(args,total_datas,logger,learner,runner,data_dir,hdkey,scheme, groups,preprocess)
+        # if getattr(args, 'moderate_lambda', False) :
+        #     train_behaviour_policy(args,total_datas,logger,learner,runner,data_dir,hdkey,scheme, groups,preprocess)
         #####################################
 
-    args.t_max=1000000
+    # args.t_max=1000000
     logger.console_logger.info("Beginning training for {} timesteps".format(args.t_max))
     #load offline datasets
     if getattr(args, 'use_offline_data', False):
@@ -321,7 +328,6 @@ def run_sequential(args, logger):
             else:
                 filled_sample = total_datas[key].to(args.device)
 
-
         new_batch = EpisodeBatch(scheme, groups, len(total_datas[hdkey[0]]), runner.episode_limit + 1,
                                  preprocess=preprocess, device=args.device)
         new_batch.update(off_batch)
@@ -333,22 +339,25 @@ def run_sequential(args, logger):
         # Run for a whole episode at a time
         if args.use_offline:
             ################################
-            sample_number = np.random.choice(len(total_datas[hdkey[0]]), args.batch_size, replace=False)
-            off_batch = {}
-            for key in hdkey:
-                if key != 'filled':
-                    off_batch[key] = total_datas[key][sample_number].to(args.device)
-                else:
-                    filled_sample = total_datas[key][sample_number].to(args.device)
-            runner.t_env += int(filled_sample.sum().to('cpu'))
-            runner._log(list(off_batch['reward'].sum(1).reshape(-1).to('cpu').numpy()),
-                        {"ep_length": filled_sample.sum().to('cpu').float(), "n_episodes": args.batch_size}, '')
-            new_batch = EpisodeBatch(scheme, groups, args.batch_size, runner.episode_limit + 1, preprocess=preprocess,
-                                     device=args.device)
-            new_batch.update(off_batch)
-            new_batch.data.transition_data['filled'] = filled_sample
-            ################################
-            learner.train(new_batch, runner.t_env, episode)
+            for i in range(num_bayes_train):
+                total_datas = bootstrapped_datas[i]
+                sample_number = np.random.choice(len(total_datas[hdkey[0]]), args.batch_size, replace=False)
+                off_batch = {}
+                for key in hdkey:
+                    if key != 'filled':
+                        off_batch[key] = total_datas[key][sample_number].to(args.device)
+                    else:
+                        filled_sample = total_datas[key][sample_number].to(args.device)
+                if i==0:
+                    runner.t_env += int(filled_sample.sum().to('cpu'))
+                runner._log(list(off_batch['reward'].sum(1).reshape(-1).to('cpu').numpy()),
+                            {"ep_length": filled_sample.sum().to('cpu').float(), "n_episodes": args.batch_size}, '')
+                new_batch = EpisodeBatch(scheme, groups, args.batch_size, runner.episode_limit + 1, preprocess=preprocess,
+                                         device=args.device)
+                new_batch.update(off_batch)
+                new_batch.data.transition_data['filled'] = filled_sample
+                ################################
+                learners[i].train(new_batch, runner.t_env, episode)
         else:
             with th.no_grad():
                 episode_batch = runner.run(test_mode=False)
@@ -366,13 +375,14 @@ def run_sequential(args, logger):
                 max_ep_t = episode_sample.max_t_filled()
                 episode_sample = episode_sample[:, :max_ep_t]
 
+
                 if episode_sample.device != args.device:
                     episode_sample.to(args.device)
 
                 if args.use_bayes and not args.use_offline:
                     for i in range(num_bayes_train):
                         use_logger=True if i == num_bayes_train-1 else False
-                        learners[i].train(episode_sample, runner.t_env, episode,use_logger=use_logger)
+                        learners[i].train(episode_sample,runner.t_env, episode,use_logger=use_logger)
                 else:
                     learner.train(episode_sample, runner.t_env, episode)
                 del episode_sample
@@ -390,7 +400,7 @@ def run_sequential(args, logger):
             last_test_T = runner.t_env
             ###################################################################################
             if getattr(args, 'use_test_run', False):
-                for _ in range(n_test_runs*10):
+                for _ in range(n_test_runs*5):
                     runner.run(test_mode=True)
             else:
                 for _ in range(n_test_runs):
@@ -405,16 +415,27 @@ def run_sequential(args, logger):
             save_model_interval = args.save_model_interval
         if args.save_model and (runner.t_env - model_save_time >= save_model_interval or model_save_time == 0):
             model_save_time = runner.t_env
-            if 'map_name' in args.env_args.keys():
-                save_path = os.path.join(args.local_results_path, "models", args.env_args['map_name'],args.unique_token, str(runner.t_env))
+            if not args.use_bayes:
+                if 'map_name' in args.env_args.keys():
+                    save_path = os.path.join(args.local_results_path, "models", args.env_args['map_name'],args.unique_token,str(runner.t_env))
+                else:
+                    save_path = os.path.join(args.local_results_path, "models", args.unique_token, str(runner.t_env))
+                os.makedirs(save_path, exist_ok=True)
+                logger.console_logger.info("Saving models to {}".format(save_path))
+
+                learner.save_models(save_path)
             else:
-                save_path = os.path.join(args.local_results_path, "models", args.unique_token, str(runner.t_env))
-            os.makedirs(save_path, exist_ok=True)
-            logger.console_logger.info("Saving models to {}".format(save_path))
+                for i in range(num_bayes_train):
+                    if 'map_name' in args.env_args.keys():
+                        save_path = os.path.join(args.local_results_path, "models", args.env_args['map_name'],args.unique_token,str(i),str(runner.t_env))
+                    else:
+                        save_path = os.path.join(args.local_results_path, "models", args.unique_token, str(runner.t_env))
+                    os.makedirs(save_path, exist_ok=True)
+                    logger.console_logger.info("Saving models to {}".format(save_path))
 
-            learner.save_models(save_path)
+                    learners[i].save_models(save_path)
 
-        episode += args.batch_size_run if args.runner=='parallel' or args.runner=='bayes'else 1
+        episode += args.batch_size_run if args.runner=='parallel' or args.use_bayes else 1
 
         if (runner.t_env - last_log_T) >= args.log_interval:
             logger.log_stat("episode", episode, runner.t_env)
@@ -440,14 +461,25 @@ def run_sequential(args, logger):
     for _ in range(n_test_runs):
         runner.run(test_mode=True)
     if args.save_model:
-        if 'map_name' in args.env_args.keys():
-            save_path = os.path.join(args.local_results_path, "models", args.env_args['map_name'],args.unique_token,str(runner.t_env))
+        if not args.use_bayes:
+            if 'map_name' in args.env_args.keys():
+                save_path = os.path.join(args.local_results_path, "models", args.env_args['map_name'],
+                                         args.unique_token, str(runner.t_env))
+            else:
+                save_path = os.path.join(args.local_results_path, "models", args.unique_token, str(runner.t_env))
+            os.makedirs(save_path, exist_ok=True)
+            logger.console_logger.info("Saving models to {}".format(save_path))
+            learner.save_models(save_path)
         else:
-            save_path = os.path.join(args.local_results_path, "models", args.unique_token, str(runner.t_env))
-        # save_path = os.path.join(args.local_results_path, "models", args.unique_token, str(runner.t_env))
-        os.makedirs(save_path, exist_ok=True)
-        logger.console_logger.info("Saving models to {}".format(save_path))
-        learner.save_models(save_path)
+            for i in range(num_bayes_train):
+                if 'map_name' in args.env_args.keys():
+                    save_path = os.path.join(args.local_results_path, "models", args.env_args['map_name'],
+                                             args.unique_token, str(i), str(runner.t_env))
+                else:
+                    save_path = os.path.join(args.local_results_path, "models", args.unique_token, str(runner.t_env))
+                os.makedirs(save_path, exist_ok=True)
+                logger.console_logger.info("Saving models to {}".format(save_path))
+                learners[i].save_models(save_path)
     if 'madtkd' in args.name:
         if args.teacher and args.save_model:
             save_path = os.path.join(dirname(dirname(dirname(abspath(__file__)))), "offline_datasets",args.env_args['map_name']+'_'+args.h5file_suffix+'_teacher_model')
