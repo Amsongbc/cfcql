@@ -1,6 +1,6 @@
 # cfcql
 
-bayes offline phase, using Bernoulli masks dataset in src/run/run.py 298-305
+bayes offline phase, using Bernoulli masks dataset in src/run/run.py 305-310
 
 bayes online phase, construct distribution in src/runners/bayes_parallel_runner.py 139-157
 
