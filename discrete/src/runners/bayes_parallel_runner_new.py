@@ -7,7 +7,7 @@ import torch as th
 import os
 # Based (very) heavily on SubprocVecEnv from OpenAI Baselines
 # https://github.com/openai/baselines/blob/master/baselines/common/vec_env/subproc_vec_env.py
-class BayesParallelRunner:
+class BayesParallelRunnerNew:
 
     def __init__(self, args, logger):
         self.args = args
@@ -43,11 +43,12 @@ class BayesParallelRunner:
 
         self.log_train_stats_t = -100000
 
-    def setup(self, scheme, groups, preprocess, mac, macs,args, opponents=None):
+    def setup(self, scheme, groups, preprocess, mac, macs,mixers, args, opponents=None):
         self.new_batch = partial(EpisodeBatch, scheme, groups, self.batch_size, self.episode_limit + 1,
                                  preprocess=preprocess, device=self.args.device)
         self.mac = mac
         self.macs=macs
+        self.mixers = mixers
         self.scheme = scheme
         self.groups = groups
         self.preprocess = preprocess
@@ -91,37 +92,29 @@ class BayesParallelRunner:
         self.env_steps_this_run = 0
 
     def save_data(self,data):
+        first_batch_data = data[0, :]  # 形状为 [agent_number]
         # output_folder="/home/sbc/PycharmProjects/CFCQL/CFCQL-main/discrete/results/Q_values4"
         output_folder=os.path.join("/home/sbc/PycharmProjects/CFCQL/CFCQL-main/discrete/results/Q",self.args.unique_token)
         os.makedirs(output_folder, exist_ok=True)
-        first_batch_qouts = data[0]  # qouts_softmax 的形状为 (batch size, agent number, num_macs)
         # 将每个 agent 的数据存储到单独的文件中
-        for agent_idx in range(first_batch_qouts.shape[0]):
-            # 获取第 agent_idx 个智能体的 MAC 概率分布
-            agent_prob = first_batch_qouts[agent_idx].tolist()  # 获取第 agent_idx 个智能体的 MAC 概率分布并转换为列表
-            # 为每个 agent 创建一个文件名
-            filename = f'agent_{agent_idx}_prob.txt'
+        for agent_idx in range(len(self.macs)):
+            agent_data = first_batch_data[agent_idx]  # 获取第 agent_idx 个智能体的数据
+            filename = f'agent_{agent_idx}_data.txt'  # 为每个 agent 创建一个文件名
             filepath = os.path.join(output_folder, filename)
-            # 以追加模式保存数据
             with open(filepath, 'a') as f:  # 'a' 模式表示追加内容
-                f.write(str(agent_prob) + '\n')
+                f.write(str(agent_data) + '\n')
 
-    def save_data_prob(self, qouts_softmax):
-        # 创建输出文件夹
-        output_folder = os.path.join("/home/sbc/PycharmProjects/CFCQL/CFCQL-main/discrete/results/prob",self.args.unique_token)
+    def save_data_prob(self,data):
+        # output_folder="/home/sbc/PycharmProjects/CFCQL/CFCQL-main/discrete/results/Q_values4"
+        output_folder=os.path.join("/home/sbc/PycharmProjects/CFCQL/CFCQL-main/discrete/results/prob",self.args.unique_token)
         os.makedirs(output_folder, exist_ok=True)
-        # 只处理第一个 batch 的数据
-        first_batch_qouts = qouts_softmax[0]  # qouts_softmax 的形状为 (batch size, agent number, num_macs)
         # 将每个 agent 的数据存储到单独的文件中
-        for agent_idx in range(first_batch_qouts.shape[0]):
-            # 获取第 agent_idx 个智能体的 MAC 概率分布
-            agent_prob = first_batch_qouts[agent_idx].tolist()  # 获取第 agent_idx 个智能体的 MAC 概率分布并转换为列表
-            # 为每个 agent 创建一个文件名
-            filename = f'agent_{agent_idx}_prob.txt'
+        for agent_idx in range(len(self.macs)):
+            agent_data = data[0][agent_idx]  # 获取第 agent_idx 个智能体的数据
+            filename = f'agent_{agent_idx}_data.txt'  # 为每个 agent 创建一个文件名
             filepath = os.path.join(output_folder, filename)
-            # 以追加模式保存数据
             with open(filepath, 'a') as f:  # 'a' 模式表示追加内容
-                f.write(str(agent_prob) + '\n')
+                f.write(str(agent_data) + '\n')
 
 
     def run(self, test_mode=False):
@@ -150,24 +143,26 @@ class BayesParallelRunner:
                     q_outs=[]
                     actions_list=[]
                     for i in range(len(self.macs)):
-                        # get mac output(Q values)
+                        actions = self.mac.select_actions(self.batch, t_ep=self.t, t_env=self.t_env,
+                                                          bs=envs_not_terminated,
+                                                          test_mode=test_mode)
                         actions, qvals = self.macs[i].get_Q(self.batch, t_ep=self.t, t_env=self.t_env, bs=envs_not_terminated, test_mode=test_mode,get_Q=True)
-                        q_outs.append(qvals)
+                        qvals_expanded = qvals.unsqueeze(1)
+                        state_expanded=self.batch["state"][envs_not_terminated, self.t]
+
+                        qtotals = self.mixers[i](qvals_expanded, state_expanded)
+                        qtotals=qtotals.squeeze(1)
+                        q_outs.append(qtotals)
                         actions_list.append(actions)
 
-                    q_outs_new = th.stack(q_outs, dim=2)
-                    qouts_softmax = th.softmax(q_outs_new, dim=2)
-                    chosen_actions = th.zeros((len(qouts_softmax), self.args.n_agents))
-                    for batch_id in range(len(qouts_softmax)):
-                        batch_prob=th.multinomial(qouts_softmax[batch_id], num_samples=1).squeeze(1)
-                        for agent_id in range(self.args.n_agents):
-                            mac_id = batch_prob[agent_id]
-                            chosen_actions[batch_id, agent_id] = actions_list[mac_id][batch_id, agent_id]
+                    q_outs = th.cat(q_outs, dim=1)
+                    mac_probs = th.nn.functional.softmax(q_outs, dim=1)
+                    selected_mac_idx = th.multinomial(mac_probs, num_samples=1).squeeze(1)
+                    actions = th.stack([actions_list[i][b] for b, i in enumerate(selected_mac_idx)], dim=0)
 
-                    actions = chosen_actions
                     if test_mode==False:
-                        self.save_data(q_outs_new)
-                        self.save_data_prob(qouts_softmax)
+                        self.save_data_prob(mac_probs)
+                        self.save_data(q_outs)
                 else:
                     actions = self.mac.select_actions(self.batch, t_ep=self.t, t_env=self.t_env, bs=envs_not_terminated,
                                                       test_mode=test_mode)
