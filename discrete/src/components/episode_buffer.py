@@ -242,6 +242,102 @@ class ReplayBuffer(EpisodeBatch):
             ep_ids = np.random.choice(self.episodes_in_buffer, batch_size, replace=False)
             return self[ep_ids]
 
+    def idxsample(self, batch_size):
+        assert self.can_sample(batch_size)
+        if self.episodes_in_buffer == batch_size:
+            ep_ids = np.arange(batch_size)
+        else:
+            # Uniform sampling only atm
+            ep_ids = np.random.choice(self.episodes_in_buffer, batch_size, replace=False)
+        return ep_ids
+
+    def bernoullisample(self, idx,batch_size):
+        bernoulli_mask = np.random.binomial(1, 0.8, size=batch_size)
+        filtered_ep_ids = idx[bernoulli_mask == 1]
+        return self[filtered_ep_ids]
+
+    def uni_sample(self, batch_size):
+        return self.sample(batch_size)
+
+    def sample_latest(self, batch_size):
+        assert self.can_sample(batch_size)
+        if self.buffer_index - batch_size < 0:
+            #Uniform sampling
+            return self.uni_sample(batch_size)
+        else:
+            # Return the latest
+            return self[self.buffer_index - batch_size : self.buffer_index]
+
+    def __repr__(self):
+        return "ReplayBuffer. {}/{} episodes. Keys:{} Groups:{}".format(self.episodes_in_buffer,
+                                                                        self.buffer_size,
+                                                                        self.scheme.keys(),
+                                                                        self.groups.keys())
+
+class BayesReplayBuffer(EpisodeBatch):
+    def __init__(self, scheme, groups, buffer_size, max_seq_length, preprocess=None, device="cpu"):
+        super(BayesReplayBuffer, self).__init__(scheme, groups, buffer_size, max_seq_length, preprocess=preprocess, device=device)
+        self.buffer_size = buffer_size  # 总的 buffer 大小为 10000
+        self.offline_buffer_size = buffer_size // 2  # 前 5000 存储 offline 数据
+        # self.online_buffer_size = buffer_size - self.offline_buffer_size  # 后 5000 存储 online 数据
+        self.buffer_index = 0 # 开始时，只更新后 5000
+        self.episodes_in_buffer = 0
+
+    def insert_episode_batch(self, ep_batch):
+        # 如果 episodes_in_buffer 大于 5000，更新时只更新后 5000 条数据
+        if self.episodes_in_buffer >= self.offline_buffer_size:
+            if self.buffer_index + ep_batch.batch_size <= self.buffer_size:
+                self.update(ep_batch.data.transition_data,
+                            slice(self.buffer_index, self.buffer_index + ep_batch.batch_size),
+                            slice(0, ep_batch.max_seq_length),
+                            mark_filled=False)
+                self.update(ep_batch.data.episode_data,
+                            slice(self.buffer_index, self.buffer_index + ep_batch.batch_size))
+                self.buffer_index = (self.buffer_index + ep_batch.batch_size)
+                self.episodes_in_buffer = max(self.episodes_in_buffer, self.buffer_index)
+                self.buffer_index = self.buffer_index % self.buffer_size
+                assert self.buffer_index < self.buffer_size
+            else:
+                buffer_left = self.buffer_size - self.buffer_index
+                self.insert_episode_batch(ep_batch[self.offline_buffer_size:buffer_left+self.offline_buffer_size, :])
+                self.insert_episode_batch(ep_batch[buffer_left:, :])
+
+        else:
+            # 正常更新整个 buffer
+            self.update(ep_batch.data.transition_data,
+                        slice(self.buffer_index, self.buffer_index + ep_batch.batch_size),
+                        slice(0, ep_batch.max_seq_length),
+                        mark_filled=False)
+            self.update(ep_batch.data.episode_data,
+                        slice(self.buffer_index, self.buffer_index + ep_batch.batch_size))
+            self.buffer_index = (self.buffer_index + ep_batch.batch_size)
+            self.episodes_in_buffer = max(self.episodes_in_buffer, self.buffer_index)
+            self.buffer_index = self.buffer_index % self.buffer_size
+            assert self.buffer_index < self.buffer_size
+
+
+    def can_sample(self, batch_size):
+        return self.episodes_in_buffer-5000 >= batch_size
+
+    def sample(self, init_batch_size):
+        batch_size=init_batch_size//2
+        assert self.can_sample(batch_size)
+
+        if self.episodes_in_buffer <= self.offline_buffer_size:
+            # 如果 episodes_in_buffer 小于等于 5000，从整个 buffer 中采样
+            ep_ids = np.random.choice(self.episodes_in_buffer, batch_size, replace=False)
+            return self[ep_ids]
+        else:
+            # 如果 episodes_in_buffer 大于 5000，从前 5000 和后 5000 分别采样 batch_size
+            offline_ids = np.random.choice(self.offline_buffer_size, batch_size, replace=False)
+            online_ids = np.random.choice(range(self.offline_buffer_size, self.episodes_in_buffer), batch_size,replace=False)
+
+            # 合并 offline 和 online 的采样索引
+            combined_ids = np.concatenate([offline_ids, online_ids])
+
+            # 返回合并后的采样样本
+            return self[combined_ids]
+
     def uni_sample(self, batch_size):
         return self.sample(batch_size)
 
