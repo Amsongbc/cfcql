@@ -23,6 +23,7 @@ from functools import partial
 from components.episode_buffer import EpisodeBatch
 import h5py
 from run.offline_utils import *
+
 def get_agent_own_state_size(env_args):
     sc_env = StarCraft2Env(**env_args)
     # qatten parameter setting (only use in qatten)
@@ -210,10 +211,13 @@ def run_sequential(args, logger):
                 basic_learner.cuda()
             macs.append(basic_mac)
             learners.append(basic_learner)
-            # mixers.append(basic_learner.mixer)
+            if args.use_mixer:
+                mixers.append(basic_learner.mixer)
 
-        # runner.setup(scheme=scheme, groups=groups, preprocess=preprocess, mac=mac,macs=macs,mixers=mixers,args=args)
-        runner.setup(scheme=scheme, groups=groups, preprocess=preprocess, mac=mac, macs=macs, args=args)
+        if args.use_mixer:
+            runner.setup(scheme=scheme, groups=groups, preprocess=preprocess, mac=mac,macs=macs,mixers=mixers,args=args)
+        else:
+            runner.setup(scheme=scheme, groups=groups, preprocess=preprocess, mac=mac, macs=macs, args=args)
         # runner.setup(scheme=scheme, groups=groups, preprocess=preprocess, mac=macs[0])
     else:
         runner.setup(scheme=scheme, groups=groups, preprocess=preprocess, mac=mac)
@@ -369,21 +373,26 @@ def run_sequential(args, logger):
                 if args.accumulated_episodes and next_episode % args.accumulated_episodes != 0:
                     continue
 
-                episode_sample = buffer.sample(args.batch_size)
-
-                # Truncate batch to only filled timesteps
-                max_ep_t = episode_sample.max_t_filled()
-                episode_sample = episode_sample[:, :max_ep_t]
-
-
-                if episode_sample.device != args.device:
-                    episode_sample.to(args.device)
-
-                if args.use_bayes and not args.use_offline:
+                if args.use_bayes :
+                    idx = buffer.idxsample(args.batch_size)
                     for i in range(num_bayes_train):
-                        use_logger=True if i == num_bayes_train-1 else False
-                        learners[i].train(episode_sample,runner.t_env, episode,use_logger=use_logger)
+                        episode_sample = buffer.bernoullisample(idx, args.batch_size)
+                        # Truncate batch to only filled timesteps
+                        max_ep_t = episode_sample.max_t_filled()
+                        episode_sample = episode_sample[:, :max_ep_t]
+
+                        if episode_sample.device != args.device:
+                            episode_sample.to(args.device)
+                        learners[i].train(episode_sample,runner.t_env, episode)
                 else:
+                    episode_sample = buffer.sample(args.batch_size)
+
+                    # Truncate batch to only filled timesteps
+                    max_ep_t = episode_sample.max_t_filled()
+                    episode_sample = episode_sample[:, :max_ep_t]
+
+                    if episode_sample.device != args.device:
+                        episode_sample.to(args.device)
                     learner.train(episode_sample, runner.t_env, episode)
                 del episode_sample
 
