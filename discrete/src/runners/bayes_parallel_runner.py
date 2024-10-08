@@ -94,33 +94,23 @@ class BayesParallelRunner:
         # output_folder="/home/sbc/PycharmProjects/CFCQL/CFCQL-main/discrete/results/Q_values4"
         output_folder=os.path.join("/home/sbc/PycharmProjects/CFCQL/CFCQL-main/discrete/results/Q",self.args.unique_token)
         os.makedirs(output_folder, exist_ok=True)
-        first_batch_qouts = data[0]  # qouts_softmax 的形状为 (batch size, agent number, num_macs)
-        # 将每个 agent 的数据存储到单独的文件中
+        first_batch_qouts = data[0]  # qouts_softmax  (batch size, agent number, num_macs)
         for agent_idx in range(first_batch_qouts.shape[0]):
-            # 获取第 agent_idx 个智能体的 MAC 概率分布
-            agent_prob = first_batch_qouts[agent_idx].tolist()  # 获取第 agent_idx 个智能体的 MAC 概率分布并转换为列表
-            # 为每个 agent 创建一个文件名
+            agent_prob = first_batch_qouts[agent_idx].tolist() 
             filename = f'agent_{agent_idx}_prob.txt'
             filepath = os.path.join(output_folder, filename)
-            # 以追加模式保存数据
-            with open(filepath, 'a') as f:  # 'a' 模式表示追加内容
+            with open(filepath, 'a') as f:  
                 f.write(str(agent_prob) + '\n')
 
     def save_data_prob(self, qouts_softmax):
-        # 创建输出文件夹
         output_folder = os.path.join("/home/sbc/PycharmProjects/CFCQL/CFCQL-main/discrete/results/prob",self.args.unique_token)
         os.makedirs(output_folder, exist_ok=True)
-        # 只处理第一个 batch 的数据
-        first_batch_qouts = qouts_softmax[0]  # qouts_softmax 的形状为 (batch size, agent number, num_macs)
-        # 将每个 agent 的数据存储到单独的文件中
+        first_batch_qouts = qouts_softmax[0] 
         for agent_idx in range(first_batch_qouts.shape[0]):
-            # 获取第 agent_idx 个智能体的 MAC 概率分布
-            agent_prob = first_batch_qouts[agent_idx].tolist()  # 获取第 agent_idx 个智能体的 MAC 概率分布并转换为列表
-            # 为每个 agent 创建一个文件名
+            agent_prob = first_batch_qouts[agent_idx].tolist() 
             filename = f'agent_{agent_idx}_prob.txt'
             filepath = os.path.join(output_folder, filename)
-            # 以追加模式保存数据
-            with open(filepath, 'a') as f:  # 'a' 模式表示追加内容
+            with open(filepath, 'a') as f:  
                 f.write(str(agent_prob) + '\n')
 
 
